@@ -1,0 +1,5 @@
+build
+.vs
+.vscode
+src/extern
+out
