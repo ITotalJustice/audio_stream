@@ -1,5 +1,7 @@
 #include "ogg.hpp"
 #undef STB_VORBIS_HEADER_ONLY
+#define STB_VORBIS_NO_PUSHDATA_API
+#define STB_VORBIS_MAX_CHANNELS 2
 #include "stb_vorbis.h"
 
 namespace audio::decoder {
@@ -21,8 +23,7 @@ auto Ogg::Decode(std::size_t sample_count, std::int16_t *data) -> std::size_t {
 
 auto Ogg::Tell() noexcept -> std::pair<std::uint32_t, std::uint32_t> {
     std::scoped_lock lock{this->mutex};
-    // todo: normalise
-    return {this->stream->channel_buffer_start, this->stream->channel_buffer_end};
+    return {this->stream->current_loc, stb_vorbis_stream_length_in_samples(this->stream.get())};
 }
 
 auto Ogg::Seek(std::uint64_t target) -> bool {

@@ -9,7 +9,7 @@ Stream::Stream(int _sample_rate, int _channel_count) {
 
 auto Stream::IsDone() noexcept -> bool {
     const auto [current, total] = this->Tell();
-    return current == total;
+    return current >= total;
 }
 
 auto Stream::Resample(std::uint8_t* out, std::size_t size) -> State {

@@ -8,6 +8,8 @@ project(stream
     LANGUAGES C CXX
 )
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # option(FLAC "build with flac support" ON)
 # option(MP3 "build with mp3 support" ON)
 # option(OGG "build with ogg support" ON)

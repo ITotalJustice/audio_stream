@@ -71,6 +71,11 @@
 #ifndef STB_VORBIS_INCLUDE_STB_VORBIS_H
 #define STB_VORBIS_INCLUDE_STB_VORBIS_H
 
+#if defined(STB_VORBIS_NO_IO)
+#undef STB_VORBIS_NO_STDIO
+#define STB_VORBIS_NO_STDIO 1
+#endif
+
 #if defined(STB_VORBIS_NO_CRT) && !defined(STB_VORBIS_NO_STDIO)
 #define STB_VORBIS_NO_STDIO 1
 #endif
@@ -118,10 +123,23 @@ typedef struct
    int   alloc_buffer_length_in_bytes;
 } stb_vorbis_alloc;
 
+typedef long (*stb_vorbis_ftell)(void *user);
+typedef int (*stb_vorbis_fseek)(void *user, long off, int whence);
+typedef size_t (*stb_vorbis_fread)(void *user, void *data, size_t size);
+typedef void (*stb_vorbis_fclose)(void *user);
 
 ///////////   FUNCTIONS USEABLE WITH ALL INPUT MODES
 
 typedef struct stb_vorbis stb_vorbis;
+
+typedef struct
+{
+   void* user;
+   stb_vorbis_ftell ftell;
+   stb_vorbis_fseek fseek;
+   stb_vorbis_fread fread;
+   stb_vorbis_fclose fclose;
+} stb_vorbis_io;
 
 typedef struct
 {
@@ -255,6 +273,10 @@ extern int stb_vorbis_decode_memory(const unsigned char *mem, int len, int *chan
 // buffer stored in *output. The return value is the number of samples
 // decoded, or -1 if the file could not be opened or was not an ogg vorbis file.
 // When you're done with it, just free() the pointer returned in *output.
+
+// TODO(TJ): document this.
+extern stb_vorbis * stb_vorbis_open_io(stb_vorbis_io *io, int *error, const stb_vorbis_alloc *alloc, unsigned int length);
+// TODO(TJ): document this.
 
 extern stb_vorbis * stb_vorbis_open_memory(const unsigned char *data, int len,
                                   int *error, const stb_vorbis_alloc *alloc_buffer);
@@ -781,12 +803,12 @@ struct stb_vorbis
    int comment_list_length;
    char **comment_list;
 
-  // input config
-#ifndef STB_VORBIS_NO_STDIO
-   FILE *f;
+#ifndef STB_VORBIS_NO_IO
+   stb_vorbis_io f_io;
    uint32 f_start;
-   int close_on_free;
-#endif
+#endif // STB_VORBIS_NO_IO
+
+   int use_memory;
 
    uint8 *stream;
    uint8 *stream_start;
@@ -971,6 +993,8 @@ static void setup_temp_free(vorb *f, void *p, int sz)
    free(p);
 }
 
+#ifndef __SWITCH__
+
 #define CRC32_POLY    0x04c11db7   // from spec
 
 static uint32 crc_table[256];
@@ -990,6 +1014,21 @@ static __forceinline uint32 crc32_update(uint32 crc, uint8 byte)
    return (crc << 8) ^ crc_table[byte ^ (crc >> 24)];
 }
 
+#else
+
+#include <switch.h>
+
+static void crc32_init(void)
+{
+   // stubbed.
+}
+
+static __forceinline uint32 crc32_update(uint32 crc, uint8 byte)
+{
+   return crc32CalculateWithSeed(crc, &byte, sizeof(byte);)
+}
+
+#endif // __SWITCH__
 
 // used in setup, and for huffman that doesn't go fast path
 static unsigned int bit_reverse(unsigned int n)
@@ -1313,10 +1352,10 @@ static int STBV_CDECL point_compare(const void *p, const void *q)
 /////////////////////// END LEAF SETUP FUNCTIONS //////////////////////////
 
 
-#if defined(STB_VORBIS_NO_STDIO)
+#if defined(STB_VORBIS_NO_IO)
    #define USE_MEMORY(z)    TRUE
 #else
-   #define USE_MEMORY(z)    ((z)->stream)
+   #define USE_MEMORY(z)    ((z)->use_memory)
 #endif
 
 static uint8 get8(vorb *z)
@@ -1326,11 +1365,15 @@ static uint8 get8(vorb *z)
       return *z->stream++;
    }
 
-   #ifndef STB_VORBIS_NO_STDIO
+   #ifndef STB_VORBIS_NO_IO
    {
-   int c = fgetc(z->f);
-   if (c == EOF) { z->eof = TRUE; return 0; }
-   return c;
+      uint8 data;
+      if (z->f_io.fread(z->f_io.user, &data, sizeof(data)) == sizeof(data))
+         return data;
+      else {
+         z->eof = 1;
+         return 0;
+      }
    }
    #endif
 }
@@ -1354,8 +1397,8 @@ static int getn(vorb *z, uint8 *data, int n)
       return 1;
    }
 
-   #ifndef STB_VORBIS_NO_STDIO
-   if (fread(data, n, 1, z->f) == 1)
+   #ifndef STB_VORBIS_NO_IO
+   if (z->f_io.fread(z->f_io.user, data, n) == n)
       return 1;
    else {
       z->eof = 1;
@@ -1371,10 +1414,10 @@ static void skip(vorb *z, int n)
       if (z->stream >= z->stream_end) z->eof = 1;
       return;
    }
-   #ifndef STB_VORBIS_NO_STDIO
+   #ifndef STB_VORBIS_NO_IO
    {
-      long x = ftell(z->f);
-      fseek(z->f, x+n, SEEK_SET);
+      long x = z->f_io.ftell(z->f_io.user);
+      z->f_io.fseek(z->f_io.user, x+n, SEEK_SET);
    }
    #endif
 }
@@ -1395,17 +1438,17 @@ static int set_file_offset(stb_vorbis *f, unsigned int loc)
          return 1;
       }
    }
-   #ifndef STB_VORBIS_NO_STDIO
+   #ifndef STB_VORBIS_NO_IO
    if (loc + f->f_start < loc || loc >= 0x80000000) {
       loc = 0x7fffffff;
       f->eof = 1;
    } else {
       loc += f->f_start;
    }
-   if (!fseek(f->f, loc, SEEK_SET))
+   if (!f->f_io.fseek(f->f_io.user, loc, SEEK_SET))
       return 1;
    f->eof = 1;
-   fseek(f->f, f->f_start, SEEK_END);
+   f->f_io.fseek(f->f_io.user, f->f_start, SEEK_END);
    return 0;
    #endif
 }
@@ -4245,8 +4288,10 @@ static void vorbis_deinit(stb_vorbis *p)
       setup_free(p, p->window[i]);
       setup_free(p, p->bit_reverse[i]);
    }
-   #ifndef STB_VORBIS_NO_STDIO
-   if (p->close_on_free) fclose(p->f);
+   #ifndef STB_VORBIS_NO_IO
+   if (p->f_io.fclose) {
+      p->f_io.fclose(p->f_io.user);
+   }
    #endif
 }
 
@@ -4270,9 +4315,10 @@ static void vorbis_init(stb_vorbis *p, const stb_vorbis_alloc *z)
    p->stream = NULL;
    p->codebooks = NULL;
    p->page_crc_tests = -1;
-   #ifndef STB_VORBIS_NO_STDIO
-   p->close_on_free = FALSE;
-   p->f = NULL;
+   #ifndef STB_VORBIS_NO_IO
+   memset(&p->f_io, 0, sizeof(p->f_io));
+   p->f_start = 0;
+   p->use_memory = 0;
    #endif
 }
 
@@ -4529,8 +4575,8 @@ unsigned int stb_vorbis_get_file_offset(stb_vorbis *f)
    if (f->push_mode) return 0;
    #endif
    if (USE_MEMORY(f)) return (unsigned int) (f->stream - f->stream_start);
-   #ifndef STB_VORBIS_NO_STDIO
-   return (unsigned int) (ftell(f->f) - f->f_start);
+   #ifndef STB_VORBIS_NO_IO
+   return (unsigned int) (f->f_io.ftell(f->f_io.user) - f->f_start);
    #endif
 }
 
@@ -5028,16 +5074,15 @@ int stb_vorbis_get_frame_float(stb_vorbis *f, int *channels, float ***output)
    return len;
 }
 
-#ifndef STB_VORBIS_NO_STDIO
+#ifndef STB_VORBIS_NO_IO
 
-stb_vorbis * stb_vorbis_open_file_section(FILE *file, int close_on_free, int *error, const stb_vorbis_alloc *alloc, unsigned int length)
+stb_vorbis * stb_vorbis_open_io(stb_vorbis_io *io, int *error, const stb_vorbis_alloc *alloc, unsigned int length)
 {
    stb_vorbis *f, p;
    vorbis_init(&p, alloc);
-   p.f = file;
-   p.f_start = (uint32) ftell(file);
+   p.f_io = *io;
+   p.f_start = (uint32) io->ftell(io->user);
    p.stream_len   = length;
-   p.close_on_free = close_on_free;
    if (start_decoder(&p)) {
       f = vorbis_alloc(&p);
       if (f) {
@@ -5049,6 +5094,46 @@ stb_vorbis * stb_vorbis_open_file_section(FILE *file, int close_on_free, int *er
    if (error) *error = p.error;
    vorbis_deinit(&p);
    return NULL;
+}
+
+#endif // STB_VORBIS_NO_IO
+
+#ifndef STB_VORBIS_NO_STDIO
+
+static long stb_vorbis_stdio_ftell(void *user) {
+   return ftell((FILE*)user);
+}
+
+static int stb_vorbis_stdio_fseek(void *user, long off, int whence) {
+   return fseek((FILE*)user, off, whence);
+}
+
+static size_t stb_vorbis_stdio_fread(void *user, void *data, size_t size) {
+   return fread(data, 1, size, (FILE*)user);
+}
+
+static void stb_vorbis_stdio_fclose(void *user) {
+   fclose((FILE*)user);
+}
+
+static void stb_vorbis_dummy_fclose(void *user) {
+   (void)user;
+}
+
+stb_vorbis * stb_vorbis_open_file_section(FILE *file, int close_on_free, int *error, const stb_vorbis_alloc *alloc, unsigned int length)
+{
+   stb_vorbis_io io;
+   io.user = file;
+   io.ftell = stb_vorbis_stdio_ftell;
+   io.fseek = stb_vorbis_stdio_fseek;
+   io.fread = stb_vorbis_stdio_fread;
+   if (close_on_free) {
+      io.fclose = stb_vorbis_stdio_fclose;
+   } else {
+      io.fclose = stb_vorbis_dummy_fclose;
+   }
+
+   return stb_vorbis_open_io(&io, error, alloc, length);
 }
 
 stb_vorbis * stb_vorbis_open_file(FILE *file, int close_on_free, int *error, const stb_vorbis_alloc *alloc)
@@ -5087,6 +5172,7 @@ stb_vorbis * stb_vorbis_open_memory(const unsigned char *data, int len, int *err
    p.stream_start = (uint8 *) p.stream;
    p.stream_len = len;
    p.push_mode = FALSE;
+   p.use_memory = TRUE;
    if (start_decoder(&p)) {
       f = vorbis_alloc(&p);
       if (f) {

@@ -114,6 +114,7 @@ int main(int argc, char* argv[]) {
 
     SDL_CloseAudioDevice(audio_device);
     SDL_Quit();
+    std::printf("done!\n");
 
     return 0;
 }
